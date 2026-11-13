@@ -22,6 +22,8 @@ MODELS = {
 }
 MODEL_NAME = os.environ.get("MODEL", "anime")
 OVERWRITE = os.environ.get("OVERWRITE", "false").lower() == "true"
+SMOOTH_LINES = os.environ.get("SMOOTH_LINES", "true").lower() == "true" and MODEL_NAME == "anime"
+DARK_THRESHOLD = 60
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 NATIVE_SCALE = 4
 AI_X4_MAX_MP = 2.0
@@ -120,12 +122,42 @@ def split_alpha(img):
     return img, None
 
 
+def resize_alpha(alpha, shape):
+    if alpha is None:
+        return None
+    h, w = shape[:2]
+    return cv2.resize(alpha, (w, h), interpolation=cv2.INTER_CUBIC)
+
+
 def merge_alpha(bgr, alpha):
     if alpha is None:
         return bgr
-    h, w = bgr.shape[:2]
-    alpha = cv2.resize(alpha, (w, h), interpolation=cv2.INTER_CUBIC)
     return np.dstack((bgr, alpha))
+
+#---------
+# LINE SMOOTHING
+#---------
+def smooth_alpha(alpha, sigma):
+    blurred = cv2.GaussianBlur(alpha, (0, 0), sigma).astype(np.float32)
+    return np.clip((blurred - 127.5) * 3.0 + 127.5, 0, 255).astype(np.uint8)
+
+
+def smooth_lines(bgr, alpha, scale):
+    sigma = max(1.2, 0.6 * scale)
+    brightest = bgr.max(axis=2)
+    inside = np.ones(brightest.shape, dtype=bool) if alpha is None else alpha > 8
+    dark = (brightest < DARK_THRESHOLD) & inside
+    if not dark.any():
+        return bgr, alpha
+    source = (dark | ~inside).astype(np.float32)
+    smooth = (cv2.GaussianBlur(source, (0, 0), sigma) > 0.5) & inside
+    ink = np.median(bgr[dark], axis=0).astype(np.float32)
+    hole = cv2.dilate(dark.astype(np.uint8) * 255, np.ones((5, 5), np.uint8))
+    filled = cv2.inpaint(bgr, hole, 3, cv2.INPAINT_TELEA)
+    soft = cv2.GaussianBlur(smooth.astype(np.float32), (0, 0), 0.8)[..., None]
+    out = filled.astype(np.float32) * (1.0 - soft) + ink * soft
+    out = np.clip(out.round(), 0, 255).astype(np.uint8)
+    return out, (smooth_alpha(alpha, sigma) if alpha is not None else None)
 
 #---------
 # PIPELINE
@@ -152,7 +184,8 @@ def enhance(model, img):
     else:
         mode = "classic"
         result = classic_enhance(img)
-    return limit_side(result), mode
+    result = limit_side(result)
+    return result, mode, result.shape[1] / w
 
 #---------
 # IO
@@ -190,7 +223,10 @@ def main():
             print(f"cannot read {src.name}")
             continue
         bgr, alpha = split_alpha(img)
-        result, mode = enhance(model, bgr)
+        result, mode, scale = enhance(model, bgr)
+        alpha = resize_alpha(alpha, result.shape)
+        if SMOOTH_LINES and mode != "classic":
+            result, alpha = smooth_lines(result, alpha, scale)
         result = merge_alpha(result, alpha)
         write_image(OUTPUT_DIR / src.name, result)
         print(f"{src.name}: {mode}, {bgr.shape[1]}x{bgr.shape[0]} -> {result.shape[1]}x{result.shape[0]}, {time.time() - started:.1f}s")
