@@ -16,7 +16,12 @@ import torch.nn.functional as F
 #---------
 INPUT_DIR = Path("input")
 OUTPUT_DIR = Path("output")
-WEIGHTS = Path("weights/realesr-general-x4v3.pth")
+MODELS = {
+    "photo": Path("weights/realesr-general-x4v3.pth"),
+    "anime": Path("weights/realesr-animevideov3.pth"),
+}
+MODEL_NAME = os.environ.get("MODEL", "anime")
+OVERWRITE = os.environ.get("OVERWRITE", "false").lower() == "true"
 EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 NATIVE_SCALE = 4
 AI_X4_MAX_MP = 2.0
@@ -52,7 +57,7 @@ class SRVGGNetCompact(nn.Module):
 
 
 def load_model():
-    state = torch.load(WEIGHTS, map_location="cpu")
+    state = torch.load(MODELS[MODEL_NAME], map_location="cpu")
     if "params_ema" in state:
         state = state["params_ema"]
     elif "params" in state:
@@ -98,6 +103,31 @@ def classic_enhance(img):
     return cv2.addWeighted(img, 1.5, blur, -0.5, 0)
 
 #---------
+# ALPHA
+#---------
+def split_alpha(img):
+    if img.dtype != np.uint8:
+        img = (img / 257.0).astype(np.uint8) if img.dtype == np.uint16 else img.astype(np.uint8)
+    if img.ndim == 2:
+        return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR), None
+    if img.shape[2] == 4:
+        bgr = np.ascontiguousarray(img[:, :, :3])
+        alpha = np.ascontiguousarray(img[:, :, 3])
+        hidden = (alpha == 0).astype(np.uint8) * 255
+        if hidden.any() and not hidden.all():
+            bgr = cv2.inpaint(bgr, hidden, 3, cv2.INPAINT_TELEA)
+        return bgr, alpha
+    return img, None
+
+
+def merge_alpha(bgr, alpha):
+    if alpha is None:
+        return bgr
+    h, w = bgr.shape[:2]
+    alpha = cv2.resize(alpha, (w, h), interpolation=cv2.INTER_CUBIC)
+    return np.dstack((bgr, alpha))
+
+#---------
 # PIPELINE
 #---------
 def limit_side(img):
@@ -129,7 +159,7 @@ def enhance(model, img):
 #---------
 def read_image(path):
     data = np.fromfile(str(path), dtype=np.uint8)
-    return cv2.imdecode(data, cv2.IMREAD_COLOR)
+    return cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
 
 
 def write_image(path, img):
@@ -147,20 +177,23 @@ def main():
     torch.set_num_threads(os.cpu_count() or 2)
     OUTPUT_DIR.mkdir(exist_ok=True)
     files = sorted(p for p in INPUT_DIR.iterdir() if p.suffix.lower() in EXTENSIONS)
-    todo = [p for p in files if not (OUTPUT_DIR / p.name).exists()]
+    todo = [p for p in files if OVERWRITE or not (OUTPUT_DIR / p.name).exists()]
     if not todo:
         print("Nothing to process")
         return
     model = load_model()
+    print(f"model: {MODEL_NAME}")
     for src in todo:
         started = time.time()
         img = read_image(src)
         if img is None:
             print(f"cannot read {src.name}")
             continue
-        result, mode = enhance(model, img)
+        bgr, alpha = split_alpha(img)
+        result, mode = enhance(model, bgr)
+        result = merge_alpha(result, alpha)
         write_image(OUTPUT_DIR / src.name, result)
-        print(f"{src.name}: {mode}, {img.shape[1]}x{img.shape[0]} -> {result.shape[1]}x{result.shape[0]}, {time.time() - started:.1f}s")
+        print(f"{src.name}: {mode}, {bgr.shape[1]}x{bgr.shape[0]} -> {result.shape[1]}x{result.shape[0]}, {time.time() - started:.1f}s")
 
 
 if __name__ == "__main__":
