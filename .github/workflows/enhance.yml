@@ -2,6 +2,18 @@ name: Enhance photos
 
 on:
   workflow_dispatch:
+    inputs:
+      model:
+        description: Model
+        type: choice
+        options:
+          - anime
+          - photo
+        default: anime
+      overwrite:
+        description: Overwrite existing results in output/
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -10,6 +22,9 @@ jobs:
   enhance:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      MODEL: ${{ inputs.model }}
+      OVERWRITE: ${{ inputs.overwrite }}
     steps:
       - uses: actions/checkout@v4
 
@@ -25,12 +40,13 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: weights
-          key: realesr-general-x4v3
+          key: weights-${{ inputs.model }}
 
       - name: Download weights
         run: |
           mkdir -p weights
-          test -f weights/realesr-general-x4v3.pth || curl -L -o weights/realesr-general-x4v3.pth https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/realesr-general-x4v3.pth
+          if [ "$MODEL" = "photo" ]; then NAME=realesr-general-x4v3; else NAME=realesr-animevideov3; fi
+          test -f weights/$NAME.pth || curl -L -o weights/$NAME.pth https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.5.0/$NAME.pth
 
       - run: python enhance.py
 
